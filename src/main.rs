@@ -38,8 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "content": args.prompt
                 }
             ],
-            // "model": "anthropic/claude-haiku-4.5",
-            "model": "minimax/minimax-m2.5:free",
+            "model": "anthropic/claude-haiku-4.5",
+            // "model": "minimax/minimax-m2.5:free",
             "tools": [
                 {
                   "type": "function",
@@ -64,6 +64,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     eprintln!("Logs from your program will appear here!");
+    // Check if tool_calls is not null, if so, print the tool calls
+    if let Some(tool_calls) = response["choices"][0]["message"]["tool_calls"].as_array() {
+        // Extract the function_name and  file_path
+        // let function_name = &tool_calls[0]["function"]["name"];
+        let function_arguments = &tool_calls[0]["function"]["arguments"];
+        let file_path = function_arguments
+            .as_str()
+            .and_then(|args| serde_json::from_str::<Value>(args).ok())
+            .and_then(|v| v["file_path"].as_str().map(|s| s.to_string()));
+        if let Some(path) = file_path {
+            match tokio::fs::read_to_string(path).await {
+                Ok(file_content) => println!("{}", file_content),
+                Err(_err) => println!("failed to read file"),
+            }
+        } else {
+            println!("`file_path` not found in function arguments");
+        }
+    }
 
     if let Some(content) = response["choices"][0]["message"]["content"].as_str() {
         println!("{}", content);
