@@ -1,7 +1,9 @@
+mod schema;
+use schema::{ChatMessage, ChatRequest, ToolSpec, ToolMessage, Message, AssistantMessage, ToolCall};
 use async_openai::{Client, config::OpenAIConfig};
 use clap::Parser;
-use serde_json::{Value, json};
-use std::{env, process};
+use serde_json::{Value};
+use std::{env};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -10,82 +12,107 @@ struct Args {
     prompt: String,
 }
 
+const OPENROUTER_BASE_URL_ENV: &str = "OPENROUTER_BASE_URL";
+const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
+const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+fn build_config() -> Result<OpenAIConfig, Box<dyn std::error::Error>> {
+    let base_url = env::var(OPENROUTER_BASE_URL_ENV)
+        .unwrap_or_else(|_| DEFAULT_OPENROUTER_BASE_URL.to_string());
+
+    let api_key = env::var(OPENROUTER_API_KEY_ENV).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "OPENROUTER_API_KEY is not set")
+    })?;
+
+    Ok(OpenAIConfig::new()
+        .with_api_base(base_url)
+        .with_api_key(api_key))
+}
+
+fn build_client(config: OpenAIConfig) -> Client<OpenAIConfig> {
+    Client::with_config(config)
+}
+
+async fn execute_tool(tool_call: &ToolCall,) -> Result<Option<String>, std::io::Error> {
+    let file_path = serde_json::from_str::<Value>(&tool_call.function.arguments)
+    .ok()
+    .and_then(|v| v["file_path"].as_str().map(|s| s.to_string()));
+    if let Some(path) = file_path {
+        let file_content = tokio::fs::read_to_string(path).await?;
+        Ok(Some(file_content))
+    } else {
+        Ok(None)
+    }
+}
+
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let config = build_config()?;
+    let client = build_client(config);
 
-    let base_url = env::var("OPENROUTER_BASE_URL")
-        .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+    let messages = vec![Message::Chat(ChatMessage::user(args.prompt))];
+    let model = "anthropic/claude-haiku-4.5".to_string();
+    // let model = "nvidia/nemotron-3-super-120b-a12b:free".to_string();
+    let tools = vec![ToolSpec::read_file_tool()];
 
-    let api_key = env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
-        eprintln!("OPENROUTER_API_KEY is not set");
-        process::exit(1);
-    });
+    let mut request = ChatRequest {
+        messages,
+        model,
+        tools,
+    };
 
-    let config = OpenAIConfig::new()
-        .with_api_base(base_url)
-        .with_api_key(api_key);
 
-    let client = Client::with_config(config);
+    loop{
+        let response: Value = client
+            .chat()
+            .create_byot(serde_json::to_value(&request)?)
+            .await?;
 
-    #[allow(unused_variables)]
-    let response: Value = client
-        .chat()
-        .create_byot(json!({
-            "messages": [
-                {
-                    "role": "user",
-                    "content": args.prompt
-                }
-            ],
-            "model": "anthropic/claude-haiku-4.5",
-            // "model": "minimax/minimax-m2.5:free",
-            "tools": [
-                {
-                  "type": "function",
-                  "function": {
-                    "name": "Read",
-                    "description": "Read and return the contents of a file",
-                    "parameters": {
-                      "type": "object",
-                      "properties": {
-                        "file_path": {
-                          "type": "string",
-                          "description": "The path to the file to read"
-                        }
-                      },
-                      "required": ["file_path"]
-                    }
-                  }
-                }
-            ]
-        }))
-        .await?;
+        // println!("{}", serde_json::to_string_pretty(&response)?);
 
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    eprintln!("Logs from your program will appear here!");
-    // Check if tool_calls is not null, if so, print the tool calls
-    if let Some(tool_calls) = response["choices"][0]["message"]["tool_calls"].as_array() {
-        // Extract the function_name and  file_path
-        // let function_name = &tool_calls[0]["function"]["name"];
-        let function_arguments = &tool_calls[0]["function"]["arguments"];
-        let file_path = function_arguments
-            .as_str()
-            .and_then(|args| serde_json::from_str::<Value>(args).ok())
-            .and_then(|v| v["file_path"].as_str().map(|s| s.to_string()));
-        if let Some(path) = file_path {
-            match tokio::fs::read_to_string(path).await {
-                Ok(file_content) => println!("{}", file_content),
-                Err(_err) => println!("failed to read file"),
-            }
-        } else {
-            println!("`file_path` not found in function arguments");
+        //transform tool_calls from Value to Vec<ToolCall>
+        let tool_calls = response["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .map(|calls| {
+                calls.iter().filter_map(|call| {
+                    serde_json::from_value::<ToolCall>(call.clone()).ok()
+                }).collect::<Vec<ToolCall>>()
+            })            
+            .unwrap_or_default();
+    
+        if tool_calls.is_empty() {
+            println!("{}", response["choices"][0]["message"]["content"].as_str().unwrap_or(""));
+            break;
         }
-    }
 
-    if let Some(content) = response["choices"][0]["message"]["content"].as_str() {
-        println!("{}", content);
+        let assistant_reply = response["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default();
+        request.messages.push(Message::Assistant(AssistantMessage {
+            role: "assistant".to_string(),
+            content: assistant_reply.to_string(),
+            tool_calls: tool_calls.clone(),
+        }));
+
+        for tool_call in tool_calls {
+            match execute_tool(&tool_call).await {
+                Ok(Some(file_content)) => {
+                    let tool_message = ToolMessage {
+                        role: "tool".to_string(),
+                        tool_call_id: tool_call.id.clone(),
+                        content: file_content,
+                    };
+                    request.messages.push(Message::Tool(tool_message));
+                }
+                Ok(None) => eprintln!("file_path not found in function arguments"),
+                Err(_) => eprintln!("failed to read file"),
+            }
+        } 
+        // println!("{}", serde_json::to_string_pretty(&request)?);
     }
 
     Ok(())
 }
+
