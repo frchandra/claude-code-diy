@@ -7,6 +7,7 @@ use schema::{
 };
 use serde_json::Value;
 use std::env;
+use std::process::Command;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -40,7 +41,7 @@ fn build_client(config: OpenAIConfig) -> Client<OpenAIConfig> {
 }
 
 async fn execute_tool(request_for_tool: &RequestForTool) -> Result<Option<String>, std::io::Error> {
-    let properties_spec = request_for_tool.function.get_argument().map_err(|e| {
+    let func_invocation_args = request_for_tool.function.get_argument().map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("invalid tool arguments JSON: {e}"),
@@ -49,19 +50,49 @@ async fn execute_tool(request_for_tool: &RequestForTool) -> Result<Option<String
 
     match request_for_tool.function.name.as_str() {
         "Read" => {
-            let file_content = tokio::fs::read_to_string(&properties_spec.file_path).await?;
+            let file_path = func_invocation_args.file_path.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "missing `file_path` in tool arguments",
+                )
+            })?;
+            let file_content = tokio::fs::read_to_string(&file_path).await?;
             Ok(Some(file_content))
         }
         "Write" => {
-            let content = properties_spec.content.ok_or_else(|| {
+            let file_path = func_invocation_args.file_path.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "missing `file_path` in tool arguments",
+                )
+            })?;
+            let content = func_invocation_args.content.ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "missing `content` in Write tool arguments",
                 )
             })?;
-
-            tokio::fs::write(&properties_spec.file_path, content.clone()).await?;
+            tokio::fs::write(&file_path, content.clone()).await?;
             Ok(Some(content.to_string()))
+        }
+        "Bash" => {
+            let command = func_invocation_args.command.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "missing `content` in Bash tool arguments",
+                )
+            })?;
+
+            let output = Command::new("sh").arg("-lc").arg(command).output()?;
+            if !output.status.success() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                ));
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            Ok(Some(stdout))
         }
         _ => Ok(None),
     }
@@ -76,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let messages = vec![Message::Chat(MessageFromHuman::user(args.prompt))];
     let model = "anthropic/claude-haiku-4.5".to_string();
     // let model = "nvidia/nemotron-3-super-120b-a12b:free".to_string();
-    let tools = vec![ToolSpec::read_file_tool(), ToolSpec::write_file_tool()];
+    let tools = vec![ToolSpec::read_file_tool(), ToolSpec::write_file_tool(), ToolSpec::run_bash()];
 
     let mut request = ChatRequest {
         messages,

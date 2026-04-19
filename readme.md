@@ -63,4 +63,16 @@ This would enable the agent to create new files or modify existing files based o
 - `./run.sh -p 'How many tools are available to you in this request? Respond with only a number.`
 - `./run.sh -p 'What is 10*7? Respond with only a number.`
 
+## Step 6 Implement bash command execution
+
+Implement bash command
+execution: [reference](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request#request.body.tools)<br>
+Allow the agent to execute bash commands. This would enable the agent to perform tasks that require the use of bash
+commands, such as listing files in a directory, checking the contents of a file, or even running scripts. <br>
+
+- Try this: <br>
+- `Created README.md` <br>
+- `Created README_old.md`<br>
+- `./run.sh -p 'List project files using ls and delete the old readme file.`<br>
+
 <br>_Nismara Chandra, April 2026_
